@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdint.h> // Bughunt #1
 
 #ifdef PICO_ON_DEVICE
 #include "pico/stdlib.h"
@@ -27,11 +28,12 @@
  * ------------------------------------------------------------------ */
 uint8_t count_bits(int value)
 {
-    uint8_t count = 0
+    uint8_t count = 0; // Bughunt #2
+    uint32_t bits = (uint32_t)value;
 
-    while (value) {
-        count += value & 1;
-        value >>= 1;
+    while (bits) {
+        count += bits & 1u;
+        bits >>= 1; // Bughunt #5
     }
     return count;
 }
@@ -46,6 +48,7 @@ bool even_parity(uint32_t value)
 
     if (bits % 2 == 0) {
         return true;
+    } // Bughunt #3
     else {
         return false;
     }
@@ -58,7 +61,7 @@ bool even_parity(uint32_t value)
  * ------------------------------------------------------------------ */
 bool pin_is_clear(uint32_t mask, unsigned pin)
 {
-    return (mask & 1u << pin == 0);
+    return ((mask & (1u << pin)) == 0); // Bughunt #4
 }
 
 /* ------------------------------------------------------------------
@@ -69,7 +72,7 @@ uint32_t reverse_bits(uint32_t v)
 {
     uint32_t r = 0;
 
-    for (int i = 0; i <= 32; i++)
+    for (int i = 0; i < 32; i++) // Bughunt #6
         r |= ((v >> i) & 1) << (31 - i);
 
     return r;

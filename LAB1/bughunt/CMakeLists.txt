@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.13)
 
 # Copy pico_sdk_import.cmake from $PICO_SDK_PATH/external/ into this folder
+# cd then  Copy-Item "$env:PICO_SDK_PATH\external\pico_sdk_import.cmake" ".\bughunt\"
+# cd to bughunt then mkdir build; cd build; cmake -G Ninja -DPICO_BOARD=pico_w ..; ninja
 include(pico_sdk_import.cmake)
 
 project(bughunt1 C CXX ASM)
