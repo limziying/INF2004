@@ -22,11 +22,11 @@
 #include "hardware/gpio.h"
 #include "frame.h"
 
-#define LINK_UART   uart1
+#define LINK_UART uart1
 #define LINK_TX_PIN 8
 #define LINK_RX_PIN 9
-#define LINK_BAUD   9600
-#define BUTTON_PIN  20
+#define LINK_BAUD 9600
+#define BUTTON_PIN 20
 
 static void link_init(void)
 {
@@ -36,8 +36,8 @@ static void link_init(void)
     uart_set_format(LINK_UART, 8, 1, UART_PARITY_NONE);
     uart_set_fifo_enabled(LINK_UART, true);
 
-    /* keeps the serial monitor tidy */
-    uart_set_translate_crlf(LINK_UART, true);
+    /* Frames are binary data, so every byte must reach the UART unchanged. */
+    uart_set_translate_crlf(LINK_UART, false);
 }
 
 static void send_reading(const reading_t *r)
@@ -56,10 +56,28 @@ static void rx_poll(void)
     static uint8_t buf[FRAME_MAX];
     static uint8_t n = 0;
 
-    while (uart_is_readable(LINK_UART)) {
-        buf[n++] = (uint8_t)uart_getc(LINK_UART);
+    while (uart_is_readable(LINK_UART))
+    {
+        uint8_t byte = (uint8_t)uart_getc(LINK_UART);
 
-        if (n == 2 + FRAME_PAYLOAD + 1) {
+        if (n == 0)
+        {
+            if (byte != FRAME_SOF)
+                continue;
+            buf[n++] = byte;
+            continue;
+        }
+
+        buf[n++] = byte;
+
+        if (n == 2 && buf[1] != FRAME_PAYLOAD)
+        {
+            n = 0;
+            continue;
+        }
+
+        if (n == 2 + FRAME_PAYLOAD + 1)
+        {
             reading_t r;
 
             hexdump("rx", buf, n);
@@ -94,16 +112,18 @@ int main(void)
     printf("sizeof(reading_t) = %u bytes\n\n", (unsigned)sizeof(reading_t));
 
     bool was_down = false;
-    uint16_t seq  = 0;
+    uint16_t seq = 0;
 
-    while (true) {
+    while (true)
+    {
         bool is_down = !gpio_get(BUTTON_PIN);
 
-        if (is_down && !was_down) {
+        if (is_down && !was_down)
+        {
             reading_t r = {
-                .sensor_id    = 0x1234,
-                .status       = 0x01,
-                .temp_c_x10   = 253,
+                .sensor_id = 0x1234,
+                .status = 0x01,
+                .temp_c_x10 = 253,
                 .timestamp_ms = 0x0A0B0C0D + seq++,
             };
             send_reading(&r);
