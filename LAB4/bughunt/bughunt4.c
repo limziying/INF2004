@@ -31,12 +31,11 @@ static uint pwm_slice;
 static uint16_t wrap;
 static uint16_t duty;
 
-static bool sample_cb(struct repeating_timer *t)
+static void sample_once(void)
 {
-    (void)t;
-
-    uint16_t raw_a = adc_read();
+    /* Bug 6: select the ADC input before converting that channel. */
     adc_select_input(0);
+    uint16_t raw_a = adc_read();
 
     adc_select_input(1);
     uint16_t raw_b = adc_read();
@@ -45,21 +44,22 @@ static bool sample_cb(struct repeating_timer *t)
     uint32_t filt_b = iir_step(1, raw_b);
 
     uint16_t mv = adc_to_mv((uint16_t)filt_a);
-    float    v  = mv / 1000.0f;
 
-    uint32_t delta = TARGET_MV - mv;
+    /* Bug 8: signed difference supports both control directions. */
+    int32_t delta = (int32_t)TARGET_MV - (int32_t)mv;
 
     if (delta < 0) {
         if (duty > 0) duty--;
-    } else {
+    } else if (delta > 0) {
         if (duty < wrap) duty++;
     }
     pwm_set_gpio_level(PWM_PIN, duty);
 
-    printf("A raw=%4u filt=%4u  %4u mV (%d V)   B raw=%4u filt=%4u   duty=%u/%u\n",
-           raw_a, (unsigned)filt_a, mv, v, raw_b, (unsigned)filt_b, duty, wrap);
-
-    return true;
+    /* Bug 7: print voltage using integer units, avoiding a float/%d mismatch. */
+    printf("A raw=%4u filt=%4u  %4u mV (%u.%03u V)   B raw=%4u filt=%4u   duty=%u/%u\n",
+           (unsigned)raw_a, (unsigned)filt_a, (unsigned)mv,
+           (unsigned)(mv / 1000u), (unsigned)(mv % 1000u),
+           (unsigned)raw_b, (unsigned)filt_b, (unsigned)duty, (unsigned)wrap);
 }
 
 int main(void)
@@ -85,12 +85,11 @@ int main(void)
     adc_gpio_init(ADC_PIN_B);
 
     printf("BUG HUNT #4 - PWM %d Hz, wrap=%u, sampling every %d ms\n",
-           PWM_HZ, wrap, SAMPLE_MS);
+           PWM_HZ, (unsigned)wrap, SAMPLE_MS);
     printf("measure GP0 with a scope or a second Pico and check the frequency\n\n");
 
-    struct repeating_timer timer;
-    add_repeating_timer_ms(SAMPLE_MS, sample_cb, NULL, &timer);
-
-    while (true)
-        tight_loop_contents();
+    while (true) {
+        sample_once();
+        sleep_ms(SAMPLE_MS);
+    }
 }

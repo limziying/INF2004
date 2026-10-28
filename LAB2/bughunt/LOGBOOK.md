@@ -8,14 +8,14 @@ they are the evidence that you were reasoning rather than guessing.
 
 | # | Symptom observed | Hypothesis | Experiment (ONE change) | Predicted | Result | Conclusion |
 |---|---|---|---|---|---|---|
-| 1 | | | | | | |
-| 2 | | | | | | |
-| 3 | | | | | | |
-| 4 | | | | | | |
-| 5 | | | | | | |
-| 6 | | | | | | |
-| 7 | | | | | | |
-| 8 | | | | | | |
+| 1 | Vector A encodes as 14 bytes and contains three unexpected zero bytes. | The encoder is copying the in-memory `reading_t` layout, including compiler padding. | Replace raw-struct copying with explicit field serialization. | The payload should contain only the nine specified field bytes. | The corrected encoder emits a 12-byte frame with a 9-byte payload. | A C struct's memory layout is not the protocol's wire format. |
+| 2 | `0x1234` appears as `34 12`; timestamp bytes are also reversed. | Raw memory copying uses native little-endian order, while the protocol specifies big-endian. | Write each multi-byte field most-significant byte first. | The sensor ID should be `12 34` and timestamp `0A 0B 0C 0D`. | The output byte order matches the golden frame. | Endianness must be specified explicitly at the serialization boundary. |
+| 3 | The length byte is `0C` instead of `09`, and the checksum differs. | The encoder uses the padded struct size and/or checksums a range inconsistent with the payload. | Set the length to `FRAME_PAYLOAD` and sum the emitted payload bytes only. | Length should be 9 and vector A's checksum should be `72`. | Golden frames match with a 12-byte total frame. | Length and checksum must describe the protocol payload, not the C struct. |
+| 4 | UBSan reports left-shifting 128 by 24 places in the decoder. | A `uint8_t` is promoted to signed `int` before the shift. | Cast the byte to `uint32_t` before shifting it into the timestamp. | The shift should be defined and preserve the high timestamp byte. | The corrected expression explicitly shifts an unsigned 32-bit value. | Cast before shifting; casting after an overflowing shift is too late. |
+| 5 | A malformed length can drive a copy beyond the local payload buffer; truncated frames may also be accepted. | The decoder trusts the wire-provided length without validating it against the protocol and received frame size. | Reject lengths other than `FRAME_PAYLOAD` and reject truncated input before copying. | Oversized, wrong-length, and truncated frames should be rejected without an out-of-bounds access. | The corrected decoder validates both conditions before copying. | Validate untrusted lengths before using them as loop bounds or indexes. |
+| 6 | A transmitted frame containing `0A` gains an extra `0D` on the UART link. | CR/LF translation is changing a binary payload byte as if it were text. | Disable UART CR/LF translation. | The receiver should observe the exact bytes printed by the transmitter. | With translation disabled, UART sends binary bytes unchanged. | Text-oriented translation must not be enabled on a binary protocol. |
+| 7 | After a byte is inserted or lost, received 12-byte groups stay out of alignment. | The receiver assumes fixed-size groups and does not search for the start byte after corruption. | Make reception hunt for `FRAME_SOF` and validate the length before accepting a complete frame. | Invalid prefixes should be discarded and a later valid frame should be recoverable. | The corrected receiver searches for SOF and checks frame length before decode. | A streaming receiver needs framing and a recovery path, not only a fixed byte count. |
+| 8 | The golden checksum initially looks like another possible encoder defect. | The checksum may include the header or use a different checksum algorithm. | Sum the nine payload bytes by hand and compare with the specification's examples. | Vector A should sum to `0x72` when only payload bytes are included. | The specified payload-only sum matches the golden checksum. | This hypothesis is ruled out; the original mismatch came from encoding the wrong bytes/range. |
 
 ---
 
@@ -82,13 +82,13 @@ if (in_len < len + 3) return false;
 
 | # | File & line | Class (syntax / logical / heisenbug / UB) | The defect | The fix | Why the fix is correct |
 |---|---|---|---|---|---|
-| 1 | | | | | |
-| 2 | | | | | |
-| 3 | | | | | |
-| 4 | | | | | |
-| 5 | | | | | |
-| 6 | | | | | |
-| 7 | | | | | |
+| 1 | frame.c:frame_encode | logical | The encoder copied the raw `reading_t` object, including compiler padding. | Serialize each field explicitly into the payload. | The wire payload contains only the nine bytes specified by the protocol. |
+| 2 | frame.c:frame_encode | logical | Raw struct bytes use native endianness instead of the protocol's big-endian order. | Emit each multi-byte field most-significant byte first. | The serialized field bytes match the required network order on any host. |
+| 3 | frame.c:frame_encode | logical | The encoder derived length from `sizeof(reading_t)` and checksummed a mismatched byte range. | Use `FRAME_PAYLOAD` and checksum exactly the emitted payload bytes. | The length and checksum now describe the same nine-byte payload. |
+| 4 | frame.c:48 | UB | A promoted signed `int` is shifted left by 24 when reconstructing the timestamp. | Cast the byte to `uint32_t` before shifting. | The shift is performed on an unsigned 32-bit value and is defined. |
+| 5 | frame.c:frame_decode | logical | The decoder uses the untrusted length without checking the required size or available input. | Reject invalid payload lengths and truncated frames before copying. | The copy loop cannot exceed the validated fixed payload or received data. |
+| 6 | bughunt2_pico.c:42 | logical | UART CR/LF translation modifies binary `0x0A` bytes by inserting `0x0D`. | Disable CR/LF translation for the binary link. | Bytes are sent unchanged from the encoded frame. |
+| 7 | bughunt2_pico.c:59-69 | logical | The receiver groups fixed-size chunks without checking SOF or recovering alignment. | Hunt for SOF, validate the length, and resume searching after invalid data. | The receiver can reject a bad prefix and recover at a subsequent frame boundary. |
 
 ---
 
@@ -241,10 +241,22 @@ Why correct: a UART receiver must recover from dropped, inserted, or corrupted b
 
 **Which instrument was most useful, and which one misled you?**
 
+The golden-frame hex dumps were most useful for separating padding, byte order,
+length, and checksum symptoms. UBSan also gave a precise report for the
+integer-promotion shift. Looking only at decoded readings would have hidden the
+wire-format differences; a checksum mismatch by itself could also have pointed
+to the wrong cause.
 
 
 **What would have caught this defect automatically — a compiler flag, an
 assertion, a test, a code review rule?**
+
+The host harness's golden-byte and malformed-frame cases catch codec behavior;
+AddressSanitizer and UBSan help detect out-of-bounds access and undefined shifts.
+A review rule against serializing C structs directly, plus a two-Pico test that
+compares TX and RX hex dumps and deliberately injects a dropped or extra byte,
+would cover the wire-only defects. The sanitizer run was noted as cancelled
+before execution, so it remains a validation step rather than a claimed result.
 
 - step 1:
 gcc -Wall -Wextra -o bughunt2_host bughunt2_host.c frame.c

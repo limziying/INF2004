@@ -20,20 +20,25 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#include "hardware/sync.h"
 
 #define ENCODER_PIN   2
 #define TARGET_SLOTS  20
-#define DEBOUNCE_US   50000u
+/* Bug 4: keep debounce below legitimate pulse intervals. */
+#define DEBOUNCE_US   1000u
 #define SLOTS_PER_REV 20
 
 /* ---- state shared between the ISR and main ---- */
-static uint32_t pulse_count      = 0;   /* slots counted so far        */
-static uint64_t last_edge_us     = 0;   /* wall clock of the last edge */
-static uint32_t last_debounce_us = 0;   /* 32-bit timer, for debounce  */
-static uint32_t slot_start_us    = 0;
-static uint32_t slot_width_us    = 0;
+/* Bug 1: volatile makes ISR updates visible to the polling main loop. */
+static volatile uint32_t pulse_count = 0;
+static volatile uint64_t last_edge_us = 0;
+static volatile uint32_t slot_width_us = 0;
+static volatile uint32_t slot_period_us = 0;
+
+static uint32_t last_debounce_us = 0;
+static uint32_t slot_start_us = 0;
 static uint32_t previous_start_us = 0;
-static uint32_t slot_period_us    = 0;
+static bool have_previous_start = false;
 
 typedef enum {
     ENC_IDLE,
@@ -47,30 +52,38 @@ static enc_state_t state = ENC_IDLE;
  * ------------------------------------------------------------------ */
 void encoder_isr(uint gpio, uint32_t events)
 {
+    if (gpio != ENCODER_PIN || pulse_count >= TARGET_SLOTS)
+        return;
+
     uint32_t now = time_us_32();
 
-    if (now > last_debounce_us + DEBOUNCE_US) {
+    /* Bug 3: elapsed-time subtraction remains valid across timer rollover. */
+    if ((uint32_t)(now - last_debounce_us) <= DEBOUNCE_US)
+        return;
 
-        last_debounce_us = now;
-        last_edge_us     = time_us_64();
+    if ((events & GPIO_IRQ_EDGE_FALL) && (events & GPIO_IRQ_EDGE_RISE)) {
+        state = ENC_IDLE;
+        have_previous_start = false;
+        return;
+    }
 
-        switch (state) {
-            case ENC_IDLE:
-                if (previous_start_us != 0)
-                    slot_period_us = now - previous_start_us;
-                previous_start_us = now;
-                slot_start_us = now;
-                state = ENC_SLOT;
+    last_debounce_us = now;
+    last_edge_us = time_us_64();
 
-            case ENC_SLOT:
-                slot_width_us = now - slot_start_us;
-                pulse_count++;
-                state = ENC_IDLE;
-                break;
+    if (events & GPIO_IRQ_EDGE_FALL) {
+        if (have_previous_start)
+            slot_period_us = now - previous_start_us;
+        previous_start_us = now;
+        have_previous_start = true;
+        slot_start_us = now;
+        state = ENC_SLOT;
+    } else if (events & GPIO_IRQ_EDGE_RISE) {
+        if (state == ENC_SLOT) {
+            /* Bug 5: only a later rising edge completes the slot. */
+            slot_width_us = now - slot_start_us;
+            pulse_count++;
+            state = ENC_IDLE;
         }
-
-        printf("  edge: count=%lu width=%lu us\n",
-               (unsigned long)pulse_count, (unsigned long)slot_width_us);
     }
 }
 
@@ -93,8 +106,9 @@ int main(void)
     gpio_set_dir(ENCODER_PIN, GPIO_IN);
     gpio_pull_up(ENCODER_PIN);
 
+    /* Bug 7: width needs both the start and end edges of a pulse. */
     gpio_set_irq_enabled_with_callback(ENCODER_PIN,
-                                       GPIO_IRQ_EDGE_FALL,
+                                       GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE,
                                        true,
                                        &encoder_isr);
 
@@ -103,13 +117,22 @@ int main(void)
     while (pulse_count < TARGET_SLOTS)
         tight_loop_contents();
 
+    /* Bug 2: snapshot the multiword ISR state atomically on Cortex-M0+. */
+    uint32_t irq_state = save_and_disable_interrupts();
+    uint32_t count = pulse_count;
+    uint32_t width = slot_width_us;
+    uint32_t period = slot_period_us;
     uint64_t finished_at = last_edge_us;
+    restore_interrupts(irq_state);
 
     printf("\ndone.\n");
-    printf("  slots counted : %lu\n",     (unsigned long)pulse_count);
-    printf("  last width    : %lu us\n",  (unsigned long)slot_width_us);
-    printf("  speed         : %lu rpm\n", (unsigned long)rpm_from_period(slot_period_us));
-    printf("  last edge at  : %u us since boot\n", finished_at);
+    /* Bug 6: keep potentially blocking USB output outside the ISR. */
+    printf("  slots counted : %lu\n", (unsigned long)count);
+    printf("  last width    : %lu us\n", (unsigned long)width);
+    printf("  speed         : %lu rpm\n", (unsigned long)rpm_from_period(period));
+    /* Bug 8: use a format specifier and argument type matching uint64_t. */
+    printf("  last edge at  : %llu us since boot\n",
+           (unsigned long long)finished_at);
 
     while (true)
         tight_loop_contents();

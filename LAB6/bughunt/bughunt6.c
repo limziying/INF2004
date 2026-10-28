@@ -39,21 +39,29 @@
 
 #ifdef PICO_ON_DEVICE
 #include "pico/stdlib.h"
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <errno.h>
+#include <time.h>
 #endif
 
 #define FRAME_SOF   0xA5u
 #define POLY        0x07u
 #define LFSR_SEED   0xACE1u
-#define LFSR_TAPS   0xB000u
+/* Bug 4: this right-shifting Galois mask gives the required maximal period. */
+#define LFSR_TAPS   0xB400u
 
 /* ------------------------------------------------------------------ */
-static uint8_t  crc_table[255];
+/* Bug 1: the CRC table needs an entry for every possible byte value. */
+static uint8_t  crc_table[256];
 static uint16_t lfsr_state = LFSR_SEED;
 static bool     crc_ready  = false;
 
 void crc_init(void)
 {
-    for (int i = 0; i < 256; i++) {
+    for (unsigned i = 0; i < sizeof crc_table; i++) {
         uint8_t c = (uint8_t)i;
         for (int b = 0; b < 8; b++)
             c = (c & 0x80u) ? (uint8_t)((c << 1) ^ POLY) : (uint8_t)(c << 1);
@@ -64,8 +72,12 @@ void crc_init(void)
 
 uint8_t crc8(const uint8_t *data, uint8_t len)
 {
-    uint8_t crc;
+    /* Bug 3: make the API safe when called before explicit initialization. */
+    if (!crc_ready)
+        crc_init();
 
+    /* Bug 2: CRC-8/ATM starts from zero. */
+    uint8_t crc = 0;
     for (uint8_t i = 0; i < len; i++)
         crc = crc_table[crc ^ data[i]];
 
@@ -90,7 +102,8 @@ uint32_t lfsr_period(void)
     do {
         lfsr_next();
         n++;
-    } while (lfsr_state != start && n < 200);
+    /* Bug 5: allow the full non-zero 16-bit sequence to complete. */
+    } while (lfsr_state != start && n < 65536u);
 
     return n;
 }
@@ -103,7 +116,9 @@ typedef struct {
 
 uint32_t parse_ts(const uint8_t *frame)
 {
-    return *(uint32_t *)&frame[2];
+    /* Bug 6: assemble big-endian bytes without unaligned native loads. */
+    return ((uint32_t)frame[2] << 24) | ((uint32_t)frame[3] << 16)
+         | ((uint32_t)frame[4] << 8) | frame[5];
 }
 
 bool parse_frame(const uint8_t *frame, uint8_t frame_len, reading_t *out)
@@ -112,6 +127,10 @@ bool parse_frame(const uint8_t *frame, uint8_t frame_len, reading_t *out)
     if (frame[0] != FRAME_SOF) return false;
 
     uint8_t len = frame[1];
+
+    /* Bug 7: require the exact payload and full frame before indexing. */
+    if (len != 6 || frame_len != (uint8_t)(len + 3u))
+        return false;
 
     if (crc8(&frame[2], len) != frame[2 + len])
         return false;
@@ -125,15 +144,19 @@ bool parse_frame(const uint8_t *frame, uint8_t frame_len, reading_t *out)
 /* ------------------------------------------------------------------ */
 char *format_reading(const reading_t *r)
 {
-    char buf[32];
+    /* Bug 8: static storage remains valid after this function returns. */
+    static char buf[32];
     snprintf(buf, sizeof buf, "t=%lu v=%u",
-             (unsigned long)r->timestamp, r->value);
+             (unsigned long)r->timestamp, (unsigned)r->value);
     return buf;
 }
 
 char *label_for(const char *name)
 {
-    char *out = malloc(strlen(name));
+    /* Bug 9: reserve space for the terminating NUL and check allocation. */
+    char *out = malloc(strlen(name) + 1u);
+    if (out == NULL)
+        return NULL;
     strcpy(out, name);
     return out;
 }
@@ -144,14 +167,22 @@ char *label_for(const char *name)
  * ------------------------------------------------------------------ */
 void calibration_delay(void)
 {
-    for (uint32_t i = 0; i < 6000; i++)
-        ;
+#ifdef PICO_ON_DEVICE
+    /* Bug 10: an empty loop is removable and is not a time delay. */
+    sleep_us(500);
+#elif defined(_WIN32)
+    Sleep(1);
+#else
+    struct timespec delay = { .tv_sec = 0, .tv_nsec = 500000 };
+    while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {}
+#endif
 }
 
 /* ------------------------------------------------------------------
  * Wait for the acquisition ISR to signal that a conversion finished.
  * ------------------------------------------------------------------ */
-static bool conversion_done = false;
+/* Bug 11: the foreground wait must reload the ISR-updated flag. */
+static volatile bool conversion_done = false;
 
 void acquisition_isr(void)
 {
@@ -171,7 +202,8 @@ void wait_for_conversion(void)
 uint32_t checksum_all(const uint8_t *data, uint16_t len)
 {
     uint32_t sum = 0;
-    for (uint8_t i = 0; i < len; i++)
+    /* Bug 12: use an index wide enough to reach all uint16_t lengths. */
+    for (uint16_t i = 0; i < len; i++)
         sum += data[i];
     return sum;
 }

@@ -79,7 +79,7 @@ int main(void)
 
         if (parse_frame(frame, sizeof frame, &r))
             printf("    timestamp = 0x%08lX (must be 0x11223344), value = 0x%04X\n",
-                   (unsigned long)r.timestamp, r.value);
+                   (unsigned long)r.timestamp, (unsigned)r.value);
         else
             printf("    rejected\n");
     }

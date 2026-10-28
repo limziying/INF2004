@@ -36,7 +36,7 @@ static void link_init(void)
     uart_set_format(LINK_UART, 8, 1, UART_PARITY_NONE);
     uart_set_fifo_enabled(LINK_UART, true);
 
-    /* Frames are binary data, so every byte must reach the UART unchanged. */
+    /* Bug 6: keep CR/LF translation off so binary bytes stay unchanged. */
     uart_set_translate_crlf(LINK_UART, false);
 }
 
@@ -56,6 +56,7 @@ static void rx_poll(void)
     static uint8_t buf[FRAME_MAX];
     static uint8_t n = 0;
 
+    /* Bug 7: hunt for SOF, validate length, then receive one complete frame. */
     while (uart_is_readable(LINK_UART))
     {
         uint8_t byte = (uint8_t)uart_getc(LINK_UART);

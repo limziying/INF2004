@@ -4,6 +4,7 @@
 
 uint8_t frame_encode(const reading_t *r, uint8_t *out)
 {
+    /* Bug 3: use the protocol's 9-byte payload length. */
     uint8_t len = FRAME_PAYLOAD;
     uint8_t sum = 0;
     uint8_t n = 0;
@@ -11,9 +12,12 @@ uint8_t frame_encode(const reading_t *r, uint8_t *out)
     out[n++] = FRAME_SOF;
     out[n++] = len;
 
+    /* Bug 1: serialize fields explicitly, not the padded struct. */
+    /* Bug 2: write multi-byte values in big-endian order. */
     out[n++] = (uint8_t)(r->sensor_id >> 8);
     out[n++] = (uint8_t)r->sensor_id;
     out[n++] = r->status;
+
     out[n++] = (uint8_t)((uint16_t)r->temp_c_x10 >> 8);
     out[n++] = (uint8_t)r->temp_c_x10;
     out[n++] = (uint8_t)(r->timestamp_ms >> 24);
@@ -21,6 +25,7 @@ uint8_t frame_encode(const reading_t *r, uint8_t *out)
     out[n++] = (uint8_t)(r->timestamp_ms >> 8);
     out[n++] = (uint8_t)r->timestamp_ms;
 
+    /* Bug 3: checksum exactly the payload bytes. */
     for (uint8_t i = 2; i < n; i++)
         sum += out[i];
 
@@ -41,6 +46,7 @@ bool frame_decode(const uint8_t *in, uint8_t in_len, reading_t *r)
 
     len = in[1];
 
+    /* Bug 5: reject wrong and truncated lengths before copying. */
     if (len != FRAME_PAYLOAD)
         return false;
     if (in_len < (uint8_t)(len + 3))
@@ -55,6 +61,7 @@ bool frame_decode(const uint8_t *in, uint8_t in_len, reading_t *r)
     if (sum != in[2 + len])
         return false;
 
+    /* Bug 4: cast before shifting to keep the operations unsigned. */
     r->sensor_id = ((uint16_t)payload[0] << 8) | payload[1];
     r->status = payload[2];
     r->temp_c_x10 = (int16_t)(((uint16_t)payload[3] << 8) | payload[4]);

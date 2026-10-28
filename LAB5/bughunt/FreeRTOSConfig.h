@@ -42,8 +42,9 @@
 #define configAPPLICATION_ALLOCATED_HEAP        0
 
 /* Hooks and run-time introspection ------------------------------- */
-#define configCHECK_FOR_STACK_OVERFLOW          0
-#define configUSE_MALLOC_FAILED_HOOK            0
+/* Bug 6: enable overflow diagnostics for the measured task stacks. */
+#define configCHECK_FOR_STACK_OVERFLOW          2
+#define configUSE_MALLOC_FAILED_HOOK            1
 #define configUSE_DAEMON_TASK_STARTUP_HOOK      0
 #define configGENERATE_RUN_TIME_STATS           0
 #define configUSE_TRACE_FACILITY                1
@@ -85,7 +86,8 @@
  * currently a no-op, which means every one of those checks is
  * silently discarded.
  * ---------------------------------------------------------------- */
-#define configASSERT(x)
+/* Bug 9: preserve kernel precondition checks during this diagnostic build. */
+#define configASSERT(x) do { if (!(x)) { taskDISABLE_INTERRUPTS(); for (;;) {} } } while (0)
 
 /* Single core only - SMP disabled, as the lab instructs ---------- */
 #if FREE_RTOS_KERNEL_SMP
